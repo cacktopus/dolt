@@ -17,8 +17,10 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
+	"github.com/hashicorp/go-sockaddr/template"
+	"github.com/pkg/errors"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 
@@ -29,12 +31,12 @@ import (
 	"github.com/dolthub/dolt/go/store/datas"
 )
 
-func main() {
+func run() error {
 	readOnlyParam := flag.Bool("read-only", false, "run a read-only server which does not allow writes")
 	repoModeParam := flag.Bool("repo-mode", false, "act as a remote for an existing dolt directory, instead of stand alone")
 	dirParam := flag.String("dir", "", "root directory that this command will run in; default cwd")
-	grpcPortParam := flag.Int("grpc-port", -1, "the port the grpc server will listen on; default 50051")
-	httpPortParam := flag.Int("http-port", -1, "the port the http server will listen on; default 80; if http-port is equal to grpc-port, both services will serve over the same port")
+	grpcAddrParam := flag.String("grpc-addr", "localhost:50051", "the address the grpc server will listen on; default localhost:50051")
+	httpAddrParam := flag.String("http-addr", "localhost:80", "the port the http server will listen on; default localhost:80; if http-port is equal to grpc-port, both services will serve over the same port")
 	httpHostParam := flag.String("http-host", "", "hostname to use in the host component of the URLs that the server generates; default ''; if '', server will echo the :authority header")
 	flag.Parse()
 
@@ -50,17 +52,14 @@ func main() {
 		log.Println("'dir' parameter not provided. Using the current working dir.")
 	}
 
-	if *httpPortParam != -1 {
-		*httpHostParam = fmt.Sprintf("%s:%d", *httpHostParam, *httpPortParam)
-	} else {
-		*httpPortParam = 80
-		*httpHostParam = ":80"
-		log.Println("'http-port' parameter not provided. Using default port 80")
+	grpcAddr, err := resolveIP(*grpcAddrParam)
+	if err != nil {
+		return errors.Wrap(err, "parse grpc addr")
 	}
 
-	if *grpcPortParam == -1 {
-		*grpcPortParam = 50051
-		log.Println("'grpc-port' parameter not provided. Using default port 50051")
+	httpAddr, err := resolveIP(*httpAddrParam)
+	if err != nil {
+		return errors.Wrap(err, "parse http addr")
 	}
 
 	fs, err := filesys.LocalFilesysWithWorkingDir(".")
@@ -83,8 +82,8 @@ func main() {
 
 	server, err := remotesrv.NewServer(remotesrv.ServerArgs{
 		HttpHost:       *httpHostParam,
-		HttpListenAddr: fmt.Sprintf(":%d", *httpPortParam),
-		GrpcListenAddr: fmt.Sprintf(":%d", *grpcPortParam),
+		HttpListenAddr: httpAddr,
+		GrpcListenAddr: grpcAddr,
 		FS:             fs,
 		DBCache:        dbCache,
 		ReadOnly:       *readOnlyParam,
@@ -101,6 +100,32 @@ func main() {
 	}()
 	waitForSignal()
 	server.GracefulStop()
+
+	return nil
+}
+
+func resolveIP(addr string) (string, error) {
+	resolved, err := template.Parse(addr)
+	if err != nil {
+		return "", errors.Wrap(err, "parse addr")
+	}
+
+	host, _, err := net.SplitHostPort(resolved)
+	if err != nil {
+		return "", errors.Wrap(err, "split host port")
+	}
+
+	if host == "" {
+		return "", errors.New("host can't be empty. Use e.g. 0.0.0.0 to listen on all addresses")
+	}
+
+	return resolved, nil
+}
+
+func main() {
+	if err := run(); err != nil {
+		log.Fatalln("error: " + err.Error())
+	}
 }
 
 func waitForSignal() {
